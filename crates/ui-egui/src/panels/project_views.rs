@@ -939,8 +939,9 @@ fn bin_card(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, b: &Bin, v: &Vie
         job.wrap.break_anywhere = true;
         job.wrap.overflow_character = Some('…');
         let name = ui.fonts_mut(|fonts| fonts.layout_job(job));
+        let label_r = Rect::from_min_max(pos2(th.min.x, th.max.y + 2.0), pos2(th.max.x, th.max.y + 20.0));
         ui.painter().with_clip_rect(nr).galley(pos2(th.min.x, th.max.y + 11.0 - name.size().y / 2.0), name, t.text);
-        ui.painter().galley(pos2(th.max.x - cw, th.max.y + 11.0 - count.size().y / 2.0), count, t.text_dim);
+        ui.painter().with_clip_rect(label_r).galley(pos2(th.max.x - cw, th.max.y + 11.0 - count.size().y / 2.0), count, t.text_dim);
     }
     app.auto.add(&format!("{}.bin.{}", v.prefix, b.id.0), th, &b.name);
     accept_bin_drop(app, ui, th, b.id.0, actions);
