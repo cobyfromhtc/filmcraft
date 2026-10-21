@@ -870,10 +870,17 @@ fn mini_timeline(
             None
         }
     });
+    // Stop once, when the scrub begins (on the playhead handle or the bar), as the Timeline's
+    // ruler does: a stop on every move closed the audio output (and its scrub stream) each
+    // frame, and the next move's grain reopened the device — a stream rebuild per pointer
+    // event that made the drag laggy and unresponsive (#2441). While the drag goes on, only
+    // the playhead moves.
+    if which == Which::Program && (interaction.scrub_began || (!interaction.handled && (resp.drag_started() || resp.clicked()))) {
+        app.stop();
+    }
     if let Some(tk) = scrub {
         match which {
             Which::Program => {
-                app.stop();
                 app.session.set_playhead(tk);
             }
             Which::Source => {

@@ -48,6 +48,10 @@ pub struct Interaction {
     pub out_hot: bool,
     pub handled: bool,
     pub scrub: Option<Tick>,
+    /// The playhead handle's scrub gesture began this frame (its drag started, or it was clicked):
+    /// the once-per-gesture moment to stop playback, so a move never has to (see the Program
+    /// monitor's scrub bar).
+    pub scrub_began: bool,
 }
 
 /// `shown`: the part of the clip or sequence the bar shows (its time zoom range).
@@ -198,6 +202,9 @@ pub fn interact(app: &mut FilmcraftApp, ui: &mut egui::Ui, bar: Rect, which: Whi
         let id = if which == Which::Source { "source.playhead" } else { "program.playhead" };
         app.auto.add(id, rect, "Scrub playhead");
         let playhead = ui.interact(rect, egui::Id::new(id), Sense::click_and_drag()).on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        if playhead.drag_started() || playhead.clicked() {
+            result.scrub_began = true;
+        }
         if (playhead.dragged() || playhead.clicked())
             && let Some(pos) = playhead.interact_pointer_pos()
         {

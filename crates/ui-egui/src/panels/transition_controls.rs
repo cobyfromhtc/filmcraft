@@ -312,6 +312,7 @@ fn timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, lane: Rect, id: Transitio
     // the ruler moves the playhead (once the sequence is no longer borrowed, below)
     let mut seek = None;
     let rresp = ui.interact(ruler, egui::Id::new(("tr-ec-ruler", id.0)), Sense::click_and_drag());
+    let seek_began = rresp.drag_started() || rresp.clicked();
     if (rresp.dragged() || rresp.clicked())
         && let Some(pos) = rresp.interact_pointer_pos()
     {
@@ -353,8 +354,14 @@ fn timeline(app: &mut FilmcraftApp, ui: &mut egui::Ui, lane: Rect, id: Transitio
     if !sresp.dragged() && !sresp.drag_started() {
         drag = None;
     }
-    if let Some(tk) = seek {
+    // Stop once, when the gesture begins, as the Timeline's ruler does: a stop on every move
+    // closed the audio output (and its scrub stream) each frame, and the next move's grain
+    // reopened the device — a stream rebuild per pointer event that made the drag laggy and
+    // unresponsive (#2441). While the drag goes on, only the playhead moves.
+    if seek_began {
         app.stop();
+    }
+    if let Some(tk) = seek {
         app.session.set_playhead(tk);
     }
     ui.data_mut(|m| match drag {

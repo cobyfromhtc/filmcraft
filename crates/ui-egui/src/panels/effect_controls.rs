@@ -308,12 +308,18 @@ pub fn show(app: &mut FilmcraftApp, ui: &mut egui::Ui, rect: Rect) {
     // click or drag anywhere on the ruler (or the bar) to move the playhead (after the rows, which
     // reach under it, so it gets the pointer first)
     let sresp = ui.interact(scrub, egui::Id::new(("ec-scrub", clip.0)), Sense::click_and_drag());
+    // Stop once, when the gesture begins, as the Timeline's ruler does: a stop on every move
+    // closed the audio output (and its scrub stream) each frame, and the next move's grain
+    // reopened the device — a stream rebuild per pointer event that made the drag laggy and
+    // unresponsive (#2441). While the drag goes on, only the playhead moves.
+    if sresp.drag_started() || sresp.clicked() {
+        app.stop();
+    }
     if (sresp.dragged() || sresp.clicked())
         && let Some(pos) = sresp.interact_pointer_pos()
     {
         let f = ((pos.x - lane.min.x) / lane.width()).clamp(0.0, 1.0) as f64;
         let tk = rate.snap_nearest(it.start + Tick((f * it.duration.0 as f64) as i64));
-        app.stop();
         app.session.set_playhead(tk);
     }
     // the divider: a line the height of the panel, a resize cursor and a wider grab area
