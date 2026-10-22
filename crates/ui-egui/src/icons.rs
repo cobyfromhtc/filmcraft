@@ -14,6 +14,8 @@ pub enum Icon {
     Rolling,
     RateStretch,
     Remix,
+    /// Scissors: two crossed blades over two finger loops (the Cut tool).
+    Scissors,
     Razor,
     Slip,
     Slide,
@@ -280,6 +282,14 @@ pub fn paint(painter: &Painter, rect: Rect, icon: Icon, color: Color32) {
             pen.fill(&[(12.5, 2.5), (10.5, 1.0), (10.5, 4.0)]);
             pen.line(&[(12.0, 13.5), (4.0, 13.5)]);
             pen.fill(&[(3.5, 13.5), (5.5, 12.0), (5.5, 14.8)]);
+        }
+        Scissors => {
+            // original: two blades crossing at a pivot dot over two finger loops
+            pen.line(&[(11.5, 2.5), (4.5, 10.5)]);
+            pen.line(&[(4.5, 2.5), (11.5, 10.5)]);
+            pen.circle(4.5, 12.0, 2.0);
+            pen.circle(11.5, 12.0, 2.0);
+            pen.dot(8.0, 6.5, 1.0);
         }
         Razor => {
             pen.closed(&[(2.5, 5.0), (13.5, 5.0), (13.5, 11.0), (2.5, 11.0)]);

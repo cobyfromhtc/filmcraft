@@ -126,7 +126,7 @@ pub const UI_COMMANDS: &[UiCommand] = &[
     uic!("tool.rolling", "Rolling Edit Tool", [], Some("N")),
     uic!("tool.rateStretch", "Rate Stretch Tool", [], Some("R")),
     uic!("tool.remix", "Remix Tool", [], None),
-    uic!("tool.razor", "Razor Tool", [], Some("C")),
+    uic!("tool.razor", "Cut Tool", [], Some("C")),
     uic!("tool.slip", "Slip Tool", [], Some("Y")),
     uic!("tool.slide", "Slide Tool", [], Some("U")),
     uic!("tool.pen", "Pen Tool", [], Some("P")),
