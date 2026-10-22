@@ -911,7 +911,7 @@ fn card(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, id: ItemId, pre: &st
 
 /// A folder tile: icon, with the folder name and its item count sharing the row below. The count is
 /// laid out first and a long name is cut off with "…" where it would run into it, so the two never
-/// overlap at any tile size.
+/// overlap at any tile size; a count wider than the tile is clipped to the tile's label row.
 fn bin_card(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, b: &Bin, v: &View, actions: &mut Actions) {
     let t = app.tokens;
     let th = Rect::from_min_size(r.min, vec2(r.width(), r.width() * 9.0 / 16.0));
@@ -939,9 +939,12 @@ fn bin_card(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, b: &Bin, v: &Vie
         job.wrap.break_anywhere = true;
         job.wrap.overflow_character = Some('…');
         let name = ui.fonts_mut(|fonts| fonts.layout_job(job));
-        let label_r = Rect::from_min_max(pos2(th.min.x, th.max.y + 2.0), pos2(th.max.x, th.max.y + 20.0));
         ui.painter().with_clip_rect(nr).galley(pos2(th.min.x, th.max.y + 11.0 - name.size().y / 2.0), name, t.text);
-        ui.painter().with_clip_rect(label_r).galley(pos2(th.max.x - cw, th.max.y + 11.0 - count.size().y / 2.0), count, t.text_dim);
+        // The count starts at `th.max.x - cw`, left of `th.min.x` when `cw` exceeds the tile width
+        // (tiny tiles, deep bins); clip it to the tile's label row so it cannot paint outside the
+        // tile. The count position and the name's `nr` clip are unchanged.
+        let lr = Rect::from_min_max(pos2(th.min.x, th.max.y + 2.0), pos2(th.max.x, th.max.y + 20.0));
+        ui.painter().with_clip_rect(lr).galley(pos2(th.max.x - cw, th.max.y + 11.0 - count.size().y / 2.0), count, t.text_dim);
     }
     app.auto.add(&format!("{}.bin.{}", v.prefix, b.id.0), th, &b.name);
     accept_bin_drop(app, ui, th, b.id.0, actions);
