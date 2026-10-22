@@ -929,7 +929,18 @@ fn bin_card(app: &mut FilmcraftApp, ui: &mut egui::Ui, r: Rect, b: &Bin, v: &Vie
     let f = font(app);
     // The count is laid out first and the name row narrowed to what is left of it, as the clip
     // card does for its duration.
-    let count = ui.painter().layout_no_wrap(tlf!("{n} items", n = n.len()), Tokens::ui(f - 1.5), t.text_dim);
+    let count_text = tlf!("{n} items", n = n.len());
+    let mut count = ui.painter().layout_no_wrap(count_text.clone(), Tokens::ui(f - 1.5), t.text_dim);
+    if count.size().x > th.width() {
+        let mut job = egui::text::LayoutJob::single_section(count_text, egui::TextFormat::simple(Tokens::ui(f - 1.5), t.text_dim));
+        job.wrap.max_width = ((th.width() - 6.0) / 2.0).max(0.0);
+        job.wrap.max_rows = 1;
+        job.wrap.break_anywhere = true;
+        job.wrap.overflow_character = Some('…');
+        count = ui.fonts_mut(|fonts| fonts.layout_job(job));
+    }
+    let cw = count.size().x;
+
     let cw = count.size().x;
     let nr = Rect::from_min_max(pos2(th.min.x, th.max.y + 2.0), pos2((th.max.x - cw - 6.0).max(th.min.x), th.max.y + 20.0));
     if !rename_field(app, ui, nr, None, Some(b.id.0), &v.prefix) {
