@@ -422,7 +422,8 @@ impl AudioOut for CpalOut {
     }
     fn start_scrub(&mut self, fill: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String> {
         self.stop();
-                let fill = Arc::new(Mutex::new(fill));
+         #[cfg(target_os = "macos")]
+         let fill = Arc::new(Mutex::new(fill));
         #[cfg(target_os = "macos")]
         {
             self.played = Arc::new(AtomicU64::new(0));
