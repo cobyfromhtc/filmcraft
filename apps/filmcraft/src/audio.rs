@@ -422,6 +422,18 @@ impl AudioOut for CpalOut {
     }
     fn start_scrub(&mut self, fill: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String> {
         self.stop();
+                let fill = Arc::new(Mutex::new(fill));
+        #[cfg(target_os = "macos")]
+        {
+            self.played = Arc::new(AtomicU64::new(0));
+            self.health = Arc::new(Health::default());
+            self.watchdog.reset(self.epoch.elapsed());
+            self.open(fill.clone(), None)?;
+            self.fill = Some(fill);
+            Ok(self.rate)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
         let (sender, result) = channel();
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_cancelled = cancelled.clone();
@@ -475,6 +487,7 @@ impl AudioOut for CpalOut {
             .map_err(|e| format!("could not start scrub audio worker: {e}"))?;
         self.pending_start = Some(PendingStart { result, cancelled });
         Ok(self.rate)
+        }
     }
     fn poll_start(&mut self) -> Option<Result<(), String>> {
         let result = match self.pending_start.as_ref()?.result.try_recv() {
