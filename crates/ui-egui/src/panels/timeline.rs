@@ -2241,7 +2241,16 @@ pub(crate) fn wheel_input(ctx: &egui::Context) -> WheelInput {
 
 /// Puts the playhead where the pointer is on the ruler: what a press does before any drag (#1090).
 fn scrub_playhead(app: &mut FilmcraftApp, seq: &Sequence, layout: &Layout, p: Pos2, shift: bool) {
-    app.stop();
+<<<<<<< HEAD
+    if app.playback.playing || app.source_playback.clock.playing || app.session.mixrec.active() {
+        app.stop();
+    }
+=======
+    app.stop_source();
+    if app.playback.playing || app.session.mixrec.active() {
+        app.stop();
+    }
+>>>>>>> 004e58a3 (Update 2026-10-23 03:20)
     let mut tt = seq.settings.frame_rate.snap_nearest(layout.tick_at(p.x).max(Tick::ZERO));
     if shift || app.session.prefs.timeline.snap_playhead {
         tt = snap_playhead(app, seq, layout, tt);
@@ -3456,4 +3465,4 @@ mod ruler_tests {
         let (minor, label) = ruler_steps(1.0, i64::MAX);
         assert!(minor >= 1 && label >= 1 && label % minor == 0, "an unrepresentable rate: tick {minor}, label {label}");
     }
-}
+}

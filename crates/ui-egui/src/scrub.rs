@@ -52,6 +52,15 @@ impl FilmcraftApp {
     /// Once a frame: play a grain when the playhead moved under a held mouse button.
     pub(crate) fn scrub_audio(&mut self, ctx: &egui::Context) {
         let (now, down) = ctx.input(|i| (i.time, i.pointer.any_down()));
+<<<<<<< HEAD
+        if let Some(audio) = self.audio.as_mut() {
+            audio.poll_start();
+        }
+=======
+        if let Some(audio) = self.audio.as_mut() {
+            audio.poll_start();
+        }
+>>>>>>> 004e58a3 (Update 2026-10-23 03:20)
         if self.scrub_tick(now, down) {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(LINGER_S));
         }
@@ -101,8 +110,11 @@ impl FilmcraftApp {
         let mix = crate::playback_mix(&self.session, seq_id, sr);
         let fill = grain_fill(mix, self.scrub.grain.clone(), ((RAMP_S * sr as f64) as i64).max(1));
         let Some(a) = self.audio.as_mut() else { return };
-        a.stop();
-        match a.start(fill) {
+<<<<<<< HEAD
+        match a.start_scrub(fill) {
+=======
+        match a.start_scrub(fill) {
+>>>>>>> 004e58a3 (Update 2026-10-23 03:20)
             Ok(_) => self.scrub.open = true,
             Err(e) => log::warn!("audio output unavailable for scrubbing: {e}"),
         }
@@ -180,7 +192,17 @@ mod tests {
     }
 
     impl crate::AudioOut for Out {
-        fn start(&mut self, fill: Fill) -> Result<u32, String> {
+<<<<<<< HEAD
+        fn start(&mut self, _: Fill) -> Result<u32, String> {
+            Err("scrubbing must use the non-blocking start hook".into())
+        }
+        fn start_scrub(&mut self, fill: Fill) -> Result<u32, String> {
+=======
+        fn start(&mut self, _: Fill) -> Result<u32, String> {
+            Err("scrubbing must use the non-blocking start hook".into())
+        }
+        fn start_scrub(&mut self, fill: Fill) -> Result<u32, String> {
+>>>>>>> 004e58a3 (Update 2026-10-23 03:20)
             *self.fill.lock().unwrap() = Some(fill);
             Ok(48_000)
         }
@@ -266,4 +288,4 @@ mod tests {
         assert!(fill.lock().unwrap().is_some(), "the Source playback stream is still playing");
         assert!(!app.scrub.is_open());
     }
-}
+}

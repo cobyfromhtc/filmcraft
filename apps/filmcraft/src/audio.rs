@@ -8,6 +8,11 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+<<<<<<< HEAD
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+=======
+use std::sync::mpsc::{Receiver, TryRecvError, channel};
+>>>>>>> 004e58a3 (Update 2026-10-23 03:20)
 use std::time::{Duration, Instant};
 
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
@@ -39,6 +44,43 @@ pub struct CpalOut {
     /// The fallback picked when the default device could not be opened, as (host, device) names,
     /// so later lookups (`devices`, `configure`, `start`) reuse it instead of probing every PCM.
     fallback: Mutex<Option<(String, String)>>,
+<<<<<<< HEAD
+    pending_start: Option<PendingStart>,
+}
+
+struct PendingStart {
+    result: Receiver<Result<OpenedOutput, String>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct OpenedOutput {
+    stream: cpal::Stream,
+    fill: Arc<Mutex<Fill>>,
+    played: Arc<AtomicU64>,
+    health: Arc<Health>,
+    rate: u32,
+    channels: u16,
+    note: Option<Note>,
+    fallback: Option<(String, String)>,
+=======
+    pending_start: Option<PendingStart>,
+}
+
+struct PendingStart {
+    result: Receiver<Result<OpenedOutput, String>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+struct OpenedOutput {
+    stream: cpal::Stream,
+    fill: Arc<Mutex<Fill>>,
+    played: Arc<AtomicU64>,
+    health: Arc<Health>,
+    rate: u32,
+    channels: u16,
+    note: Option<Note>,
+    fallback: Option<(String, String)>,
+>>>>>>> 004e58a3 (Update 2026-10-23 03:20)
 }
 
 /// A hardware note for the status bar, translated when it is shown.
@@ -154,6 +196,11 @@ impl CpalOut {
             document_rate: None,
             note,
             fallback,
+<<<<<<< HEAD
+            pending_start: None,
+=======
+            pending_start: None,
+>>>>>>> 004e58a3 (Update 2026-10-23 03:20)
         }
     }
 
@@ -393,9 +440,179 @@ impl AudioOut for CpalOut {
         Ok(self.rate)
     }
     fn stop(&mut self) {
+<<<<<<< HEAD
+        if let Some(pending) = self.pending_start.take() {
+            pending.cancelled.store(true, Ordering::Relaxed);
+        }
         self.stream = None;
         self.fill = None;
     }
+    fn start_scrub(&mut self, fill: Fill) -> Result<u32, String> {
+        self.stop();
+        let (tx, rx) = channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let fallback = self.fallback.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let mut worker = Self {
+            stream: None,
+            fill: None,
+            played: Arc::new(AtomicU64::new(0)),
+            health: Arc::new(Health::default()),
+            watchdog: Watchdog::default(),
+            epoch: Instant::now(),
+            rate: self.rate,
+            channels: self.channels,
+            hw: self.hw.clone(),
+            document_rate: self.document_rate,
+            note: self.note.clone(),
+            fallback: Mutex::new(fallback),
+            pending_start: None,
+        };
+        std::thread::Builder::new()
+            .name("filmcraft-scrub-audio".into())
+            .spawn(move || {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    if worker_cancelled.load(Ordering::Relaxed) {
+                        return Err("scrub audio startup was cancelled".to_string());
+                    }
+                    worker.start(fill)?;
+                    if worker_cancelled.load(Ordering::Relaxed) {
+                        return Err("scrub audio startup was cancelled".to_string());
+                    }
+                    let stream = worker.stream.take().ok_or("audio stream did not start")?;
+                    let fill = worker.fill.take().ok_or("audio mixer did not start")?;
+                    let fallback = worker.fallback.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                    Ok(OpenedOutput {
+                        stream,
+                        fill,
+                        played: worker.played.clone(),
+                        health: worker.health.clone(),
+                        rate: worker.rate,
+                        channels: worker.channels,
+                        note: worker.note.clone(),
+                        fallback,
+                    })
+                }))
+                .unwrap_or_else(|_| Err("audio output startup panicked".into()));
+                let _ = tx.send(result);
+            })
+            .map_err(|e| format!("could not start scrub audio worker: {e}"))?;
+        self.pending_start = Some(PendingStart { result: rx, cancelled });
+        Ok(self.rate)
+    }
+    fn poll_start(&mut self) {
+        let Some(pending) = self.pending_start.as_ref() else { return };
+        match pending.result.try_recv() {
+            Ok(Ok(output)) => {
+                self.pending_start = None;
+                self.stream = Some(output.stream);
+                self.fill = Some(output.fill);
+                self.played = output.played;
+                self.health = output.health;
+                self.rate = output.rate;
+                self.channels = output.channels;
+                self.note = output.note;
+                *self.fallback.lock().unwrap_or_else(PoisonError::into_inner) = output.fallback;
+                self.watchdog.reset(self.epoch.elapsed());
+            }
+            Ok(Err(e)) => {
+                self.pending_start = None;
+                log::warn!("audio output unavailable for scrubbing: {e}");
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.pending_start = None;
+                log::warn!("scrub audio worker stopped before opening the output device");
+            }
+        }
+    }
+=======
+        if let Some(pending) = self.pending_start.take() {
+            pending.cancelled.store(true, Ordering::Relaxed);
+        }
+        self.stream = None;
+        self.fill = None;
+    }
+    fn start_scrub(&mut self, fill: Fill) -> Result<u32, String> {
+        self.stop();
+        let (tx, rx) = channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let worker_cancelled = cancelled.clone();
+        let fallback = self.fallback.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let mut worker = Self {
+            stream: None,
+            fill: None,
+            played: Arc::new(AtomicU64::new(0)),
+            health: Arc::new(Health::default()),
+            watchdog: Watchdog::default(),
+            epoch: Instant::now(),
+            rate: self.rate,
+            channels: self.channels,
+            hw: self.hw.clone(),
+            document_rate: self.document_rate,
+            note: self.note.clone(),
+            fallback: Mutex::new(fallback),
+            pending_start: None,
+        };
+        std::thread::Builder::new()
+            .name("filmcraft-scrub-audio".into())
+            .spawn(move || {
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    if worker_cancelled.load(Ordering::Relaxed) {
+                        return Err("scrub audio startup was cancelled".to_string());
+                    }
+                    worker.start(fill)?;
+                    if worker_cancelled.load(Ordering::Relaxed) {
+                        return Err("scrub audio startup was cancelled".to_string());
+                    }
+                    let stream = worker.stream.take().ok_or("audio stream did not start")?;
+                    let fill = worker.fill.take().ok_or("audio mixer did not start")?;
+                    let fallback = worker.fallback.lock().unwrap_or_else(PoisonError::into_inner).clone();
+                    Ok(OpenedOutput {
+                        stream,
+                        fill,
+                        played: worker.played.clone(),
+                        health: worker.health.clone(),
+                        rate: worker.rate,
+                        channels: worker.channels,
+                        note: worker.note.clone(),
+                        fallback,
+                    })
+                }))
+                .unwrap_or_else(|_| Err("audio output startup panicked".into()));
+                let _ = tx.send(result);
+            })
+            .map_err(|e| format!("could not start scrub audio worker: {e}"))?;
+        self.pending_start = Some(PendingStart { result: rx, cancelled });
+        Ok(self.rate)
+    }
+    fn poll_start(&mut self) {
+        let Some(pending) = self.pending_start.as_ref() else { return };
+        match pending.result.try_recv() {
+            Ok(Ok(output)) => {
+                self.pending_start = None;
+                self.stream = Some(output.stream);
+                self.fill = Some(output.fill);
+                self.played = output.played;
+                self.health = output.health;
+                self.rate = output.rate;
+                self.channels = output.channels;
+                self.note = output.note;
+                *self.fallback.lock().unwrap_or_else(PoisonError::into_inner) = output.fallback;
+                self.watchdog.reset(self.epoch.elapsed());
+            }
+            Ok(Err(e)) => {
+                self.pending_start = None;
+                log::warn!("audio output unavailable for scrubbing: {e}");
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                self.pending_start = None;
+                log::warn!("scrub audio worker stopped before opening the output device");
+            }
+        }
+    }
+>>>>>>> 004e58a3 (Update 2026-10-23 03:20)
     fn recover(&mut self) {
         if self.stream.is_none() || self.health.failed.load(Ordering::SeqCst) {
             return;
