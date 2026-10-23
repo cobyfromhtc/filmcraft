@@ -8,7 +8,9 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::sync::mpsc::{Receiver, TryRecvError};
+#[cfg(not(target_os = "macos"))]
+use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
