@@ -98,7 +98,7 @@ impl Tool {
             Tool::Rolling => Icon::Rolling,
             Tool::RateStretch => Icon::RateStretch,
             Tool::Remix => Icon::Remix,
-            Tool::Razor => Icon::Scissors,
+            Tool::Razor => Icon::Razor,
             Tool::Slip => Icon::Slip,
             Tool::Slide => Icon::Slide,
             Tool::Pen => Icon::Pen,
