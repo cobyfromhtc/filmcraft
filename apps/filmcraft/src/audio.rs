@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, PoisonError, TryLockError};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use filmcraft_engine::settings::AudioHardwarePrefs;
-use filmcraft_ui_egui::{AudioDevices, AudioOut};
+use filmcraft_ui_egui::{AudioDevices, AudioOut, ScrubStart};
 
 /// The playback mixer callback handed to [`AudioOut::start`].
 type Fill = Box<dyn FnMut(&mut [f32], usize) + Send>;
@@ -48,6 +48,9 @@ pub struct CpalOut {
 struct PendingStart {
     result: Receiver<Result<OpenedOutput, String>>,
     cancelled: Arc<AtomicBool>,
+    /// When the worker was queued; an open that has not completed by then is given up
+    /// ([`SCRUB_START_TIMEOUT`]).
+    queued: Instant,
 }
 
 struct OpenedOutput {
@@ -312,6 +315,10 @@ impl Health {
 /// How long a stream that reported an error may go without consuming samples before it is
 /// restarted. Well under the UI's `AUDIO_STALL_S`, which gives up on the device clock.
 const STALL_RESTART: Duration = Duration::from_millis(300);
+/// How long a queued scrub open may take before it is given up. A worker stuck inside the
+/// device open (a hung driver) never reports back; without a deadline it would pin the scrub —
+/// and its 16 ms repaint poll — forever. The next scrub move opens the device again.
+const SCRUB_START_TIMEOUT: Duration = Duration::from_secs(5);
 /// At most this many restarts within [`RESTART_WINDOW`]; a device that keeps failing gives up.
 const MAX_RESTARTS: usize = 3;
 const RESTART_WINDOW: Duration = Duration::from_secs(10);
@@ -485,23 +492,32 @@ impl AudioOut for CpalOut {
                     }
                 })
                 .map_err(|e| format!("could not start scrub audio worker: {e}"))?;
-            self.pending_start = Some(PendingStart { result, cancelled });
+            self.pending_start = Some(PendingStart { result, cancelled, queued: Instant::now() });
             Ok(self.rate)
         }
     }
-    fn poll_start(&mut self) -> Option<Result<(), String>> {
-        if self.pending_start.is_none() {
-            #[cfg(target_os = "macos")]
-            return Some(Ok(()));
-            #[cfg(not(target_os = "macos"))]
-            return None;
+    fn poll_start(&mut self) -> ScrubStart {
+        // On macOS `start_scrub` opens the device synchronously: nothing queued means the scrub
+        // stream is ready. Elsewhere a queued start that has vanished was cancelled by `stop` —
+        // playback taking the device, or Settings ▸ Audio Hardware changing it — and the next
+        // scrub move opens the device again.
+        let Some(start) = self.pending_start.as_ref() else {
+            return if cfg!(target_os = "macos") { ScrubStart::Ready } else { ScrubStart::Cancelled };
+        };
+        if start.queued.elapsed() >= SCRUB_START_TIMEOUT {
+            // A worker stuck in the device open never reports back. Give the start up — the
+            // cancelled flag keeps its late result out — so the scrub is not pinned forever.
+            if let Some(start) = self.pending_start.take() {
+                start.cancelled.store(true, Ordering::SeqCst);
+            }
+            return ScrubStart::Failed("opening the audio output device timed out".into());
         }
-        let result = match self.pending_start.as_ref()?.result.try_recv() {
+        let result = match start.result.try_recv() {
             Ok(result) => result,
-            Err(TryRecvError::Empty) => return None,
+            Err(TryRecvError::Empty) => return ScrubStart::Pending,
             Err(TryRecvError::Disconnected) => {
                 self.pending_start = None;
-                return Some(Err("scrub audio startup worker stopped unexpectedly".to_string()));
+                return ScrubStart::Failed("scrub audio startup worker stopped unexpectedly".to_string());
             }
         };
         self.pending_start = None;
@@ -516,9 +532,9 @@ impl AudioOut for CpalOut {
                 self.note = output.note;
                 *self.fallback.lock().unwrap_or_else(PoisonError::into_inner) = output.fallback;
                 self.watchdog.reset(self.epoch.elapsed());
-                Some(Ok(()))
+                ScrubStart::Ready
             }
-            Err(e) => Some(Err(e)),
+            Err(e) => ScrubStart::Failed(e),
         }
     }
     fn recover(&mut self) {
@@ -623,6 +639,26 @@ mod tests {
         assert!(!health.failed.load(Ordering::SeqCst), "a stream error alone must not silence playback");
         let output = CpalOut::new();
         assert_eq!(output.played_frames(), None, "no stream, no clock");
+    }
+
+    #[test]
+    fn a_queued_scrub_start_that_never_completes_is_given_up_after_its_deadline() {
+        let mut output = CpalOut::new();
+        let (_worker, result) = std::sync::mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        output.pending_start = Some(PendingStart {
+            result,
+            cancelled: cancelled.clone(),
+            // queued before the deadline, as a worker stuck inside the device open would be
+            queued: Instant::now() - SCRUB_START_TIMEOUT,
+        });
+        match output.poll_start() {
+            ScrubStart::Failed(e) => assert!(e.contains("timed out"), "{e}"),
+            other => panic!("the hung start is given up on, not {other:?}"),
+        }
+        assert!(output.pending_start.is_none(), "the hung start is abandoned");
+        assert!(cancelled.load(Ordering::SeqCst), "the worker's late result stays out");
+        assert_eq!(output.poll_start(), ScrubStart::Cancelled);
     }
 
     fn ms(n: u64) -> Duration {
