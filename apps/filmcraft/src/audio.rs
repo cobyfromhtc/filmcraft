@@ -490,6 +490,12 @@ impl AudioOut for CpalOut {
         }
     }
     fn poll_start(&mut self) -> Option<Result<(), String>> {
+        if self.pending_start.is_none() {
+            #[cfg(target_os = "macos")]
+            return Some(Ok(()));
+            #[cfg(not(target_os = "macos"))]
+            return None;
+        }
         let result = match self.pending_start.as_ref()?.result.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return None,
