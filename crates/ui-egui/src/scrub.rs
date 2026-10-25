@@ -33,6 +33,8 @@ pub struct ScrubAudio {
     grain: Arc<Mutex<Grain>>,
     /// The scrub stream is open.
     open: bool,
+    /// The scrub stream's asynchronous startup has not completed.
+    pending: bool,
     last_tick: Option<Tick>,
     last_move: f64,
 }
@@ -45,16 +47,17 @@ impl ScrubAudio {
     /// The output device was stopped under the stream: the next grain reopens it.
     pub(crate) fn device_stopped(&mut self) {
         self.open = false;
+        self.pending = false;
     }
 }
 
 impl FilmcraftApp {
-    /// Once a frame: play a grain when the playhead moved under a held mouse button.
-    pub(crate) fn scrub_audio(&mut self, ctx: &egui::Context) {
-        let (now, down) = ctx.input(|i| (i.time, i.pointer.any_down()));
-        if let Some(audio) = self.audio.as_mut()
+    fn poll_scrub_start(&mut self) {
+        if self.scrub.pending
+            && let Some(audio) = self.audio.as_mut()
             && let Some(result) = audio.poll_start()
         {
+            self.scrub.pending = false;
             match result {
                 Ok(()) => self.scrub.open = true,
                 Err(e) => {
@@ -64,23 +67,38 @@ impl FilmcraftApp {
                 }
             }
         }
+    }
+
+    /// Once a frame: play a grain when the playhead moved under a held mouse button.
+    pub(crate) fn scrub_audio(&mut self, ctx: &egui::Context) {
+        let (now, down) = ctx.input(|i| (i.time, i.pointer.any_down()));
         if self.scrub_tick(now, down) {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64(LINGER_S));
+        } else if self.scrub.pending {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
     }
 
     /// [`FilmcraftApp::scrub_audio`] with the clock and the button state given. Returns whether
     /// the scrub stream is still open.
     pub fn scrub_tick(&mut self, now: f64, down: bool) -> bool {
+        self.poll_scrub_start();
         let ph = self.session.playhead();
         let prev = self.scrub.last_tick.replace(ph);
         if self.playback.playing || self.source_playback.clock.playing {
             // playback (Program or Source) owns the device: it stopped the scrub stream when it
             // started, and the scrub must not stop it when the button is released
             self.scrub.open = false;
+            self.scrub.pending = false;
             return false;
         }
         let on = self.session.prefs.audio.scrub_audio;
+        if !on && self.scrub.pending {
+            if let Some(a) = self.audio.as_mut() {
+                a.stop();
+            }
+            self.scrub.pending = false;
+        }
         if on && down && prev.is_some_and(|p| p != ph) {
             self.scrub_grain(ph, now);
         }
@@ -107,7 +125,7 @@ impl FilmcraftApp {
             *g = Grain { cursor: at.to_units_floor(sr as i64), left: total, total };
         }
         self.scrub.last_move = now;
-        if self.scrub.open {
+        if self.scrub.open || self.scrub.pending {
             return;
         }
         let mix = crate::playback_mix(&self.session, seq_id, sr);
@@ -115,7 +133,10 @@ impl FilmcraftApp {
         let Some(a) = self.audio.as_mut() else { return };
         a.stop();
         match a.start_scrub(fill) {
-            Ok(_) => self.scrub.open = true,
+            Ok(_) => {
+                self.scrub.pending = true;
+                self.poll_scrub_start();
+            }
             Err(e) => log::warn!("audio output unavailable for scrubbing: {e}"),
         }
     }
@@ -243,6 +264,76 @@ mod tests {
         assert!(app.scrub_tick(0.05, false), "lingers briefly after release");
         assert!(!app.scrub_tick(0.05 + LINGER_S, false), "then closes");
         assert!(fill.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn delayed_start_is_not_cancelled_by_moves_or_release() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        struct DelayedOut {
+            starts: Arc<AtomicUsize>,
+            stops: Arc<AtomicUsize>,
+            pending: Arc<AtomicBool>,
+            ready: Arc<AtomicBool>,
+        }
+
+        impl crate::AudioOut for DelayedOut {
+            fn start(&mut self, _: Fill) -> Result<u32, String> {
+                Ok(48_000)
+            }
+            fn start_scrub(&mut self, _: Fill) -> Result<u32, String> {
+                self.starts.fetch_add(1, Ordering::SeqCst);
+                self.pending.store(true, Ordering::SeqCst);
+                Ok(48_000)
+            }
+            fn poll_start(&mut self) -> Option<Result<(), String>> {
+                if self.pending.load(Ordering::SeqCst) && self.ready.load(Ordering::SeqCst) {
+                    self.pending.store(false, Ordering::SeqCst);
+                    Some(Ok(()))
+                } else {
+                    None
+                }
+            }
+            fn stop(&mut self) {
+                self.stops.fetch_add(1, Ordering::SeqCst);
+                self.pending.store(false, Ordering::SeqCst);
+            }
+            fn sample_rate(&self) -> u32 {
+                48_000
+            }
+            fn played_frames(&self) -> Option<u64> {
+                None
+            }
+        }
+
+        let (mut app, _) = app(true);
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let pending = Arc::new(AtomicBool::new(false));
+        let ready = Arc::new(AtomicBool::new(false));
+        app.audio = Some(Box::new(DelayedOut { starts: starts.clone(), stops: stops.clone(), pending: pending.clone(), ready: ready.clone() }));
+
+        let rate = app.session.sequence_rate();
+        app.scrub_tick(0.0, true);
+        app.session.set_playhead(rate.tick_of(60));
+        assert!(!app.scrub_tick(0.02, true), "a queued startup is not an open stream");
+        assert!(app.scrub.pending);
+
+        app.session.set_playhead(rate.tick_of(72));
+        assert!(!app.scrub_tick(0.04, true));
+        assert_eq!(starts.load(Ordering::SeqCst), 1, "later moves retain the pending request");
+        assert_eq!(stops.load(Ordering::SeqCst), 1, "later moves do not cancel startup");
+
+        assert!(!app.scrub_tick(0.05, false), "release leaves delayed startup alone");
+        assert!(pending.load(Ordering::SeqCst));
+        assert_eq!(stops.load(Ordering::SeqCst), 1, "release does not cancel startup");
+
+        ready.store(true, Ordering::SeqCst);
+        assert!(app.scrub_tick(0.1, false), "completed startup is open during its linger");
+        assert!(app.scrub.is_open());
+        assert!(!pending.load(Ordering::SeqCst));
+        assert!(!app.scrub_tick(0.05 + LINGER_S, false), "the ready stream closes after linger");
+        assert_eq!(stops.load(Ordering::SeqCst), 2);
     }
 
     #[test]
