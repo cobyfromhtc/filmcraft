@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use filmcraft_time::Tick;
 
-use crate::FilmcraftApp;
+use crate::{FilmcraftApp, ScrubStart};
 
 /// Length of the grain played after each move.
 pub const GRAIN_S: f64 = 0.08;
@@ -52,19 +52,33 @@ impl ScrubAudio {
 }
 
 impl FilmcraftApp {
+    /// Complete a pending scrub startup. A startup that finishes long after the move that asked
+    /// for it — the button is up and the linger has passed — is adopted here and closed by the
+    /// linger rule in [`Self::scrub_tick`] in the same tick: the grain it would have played is
+    /// already stale, and dropping it is intended.
     fn poll_scrub_start(&mut self) {
-        if self.scrub.pending
-            && let Some(audio) = self.audio.as_mut()
-            && let Some(result) = audio.poll_start()
-        {
-            self.scrub.pending = false;
-            match result {
-                Ok(()) => self.scrub.open = true,
-                Err(e) => {
-                    self.scrub.open = false;
-                    self.ui.status = tlf!("Audio output unavailable for scrubbing: {e}", e);
-                    log::warn!("audio output unavailable for scrubbing: {e}");
-                }
+        if !self.scrub.pending {
+            return;
+        }
+        let Some(audio) = self.audio.as_mut() else { return };
+        match audio.poll_start() {
+            ScrubStart::Pending => {}
+            ScrubStart::Ready => {
+                self.scrub.pending = false;
+                self.scrub.open = true;
+            }
+            ScrubStart::Cancelled => {
+                // The output was stopped elsewhere while opening (playback took the device,
+                // Settings ▸ Audio Hardware changed it): drop the startup without an error —
+                // the user caused it — so the next move can open the device again.
+                self.scrub.pending = false;
+                self.scrub.open = false;
+            }
+            ScrubStart::Failed(e) => {
+                self.scrub.pending = false;
+                self.scrub.open = false;
+                self.ui.status = tlf!("Audio output unavailable for scrubbing: {e}", e);
+                log::warn!("audio output unavailable for scrubbing: {e}");
             }
         }
     }
@@ -230,20 +244,31 @@ mod tests {
             *self.0.completion.lock().unwrap() = None;
             Ok(48_000)
         }
-        fn poll_start(&mut self) -> Option<Result<(), String>> {
-            let result = self.0.completion.lock().unwrap().take()?;
-            if result.is_ok() {
-                *self.0.active_fill.lock().unwrap() = self.0.waiting_fill.lock().unwrap().take();
-            } else {
-                self.0.waiting_fill.lock().unwrap().take();
+        fn poll_start(&mut self) -> ScrubStart {
+            if let Some(result) = self.0.completion.lock().unwrap().take() {
+                if result.is_ok() {
+                    *self.0.active_fill.lock().unwrap() = self.0.waiting_fill.lock().unwrap().take();
+                } else {
+                    self.0.waiting_fill.lock().unwrap().take();
+                }
+                return match result {
+                    Ok(()) => ScrubStart::Ready,
+                    Err(e) => ScrubStart::Failed(e),
+                };
             }
-            Some(result)
+            if self.0.waiting_fill.lock().unwrap().is_some() {
+                ScrubStart::Pending
+            } else {
+                // like CpalOut: a queued start that has vanished was cancelled by `stop`
+                ScrubStart::Cancelled
+            }
         }
         fn stop(&mut self) {
             self.0.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // like CpalOut::stop: a queued start is cancelled — it disappears without a result
             self.0.waiting_fill.lock().unwrap().take();
-            self.0.active_fill.lock().unwrap().take();
             self.0.completion.lock().unwrap().take();
+            self.0.active_fill.lock().unwrap().take();
         }
         fn sample_rate(&self) -> u32 {
             48_000
@@ -379,6 +404,38 @@ mod tests {
         assert_eq!(state.starts.load(std::sync::atomic::Ordering::SeqCst), 2);
         assert!(app.scrub.pending, "a later move retries after a failed startup");
         crate::i18n::set_current(crate::i18n::Language::En);
+    }
+
+    /// The output can be stopped elsewhere while a scrub startup is pending — Settings ▸ Audio
+    /// Hardware changed, playback took the device. The cancelled startup must not pin the scrub:
+    /// it is forgotten (without an error the user cannot act on) and the next move reopens the
+    /// device instead of `pending` staying set forever.
+    #[test]
+    fn a_startup_cancelled_by_an_external_stop_is_forgotten_and_the_next_move_retries() {
+        use std::sync::atomic::Ordering;
+
+        let (mut app, _) = app(true);
+        let state = Arc::new(DelayedState::default());
+        app.audio = Some(Box::new(DelayedOut(state.clone())));
+        let rate = app.session.sequence_rate();
+        app.scrub_tick(0.0, true);
+        app.session.set_playhead(rate.tick_of(60));
+        assert!(!app.scrub_tick(0.02, true));
+        assert!(app.scrub.pending, "the scrub startup is pending");
+
+        app.audio.as_mut().unwrap().stop();
+        assert!(!app.scrub_tick(0.03, true));
+        assert!(!app.scrub.pending, "the cancelled startup no longer pins the scrub");
+        assert!(!app.scrub.is_open());
+        assert!(!app.ui.status.contains("unavailable"), "a stop the user caused is not an error");
+
+        app.session.set_playhead(rate.tick_of(72));
+        assert!(!app.scrub_tick(0.04, true));
+        assert_eq!(state.starts.load(Ordering::SeqCst), 2, "the next move opens the device again");
+        assert!(app.scrub.pending);
+        *state.completion.lock().unwrap() = Some(Ok(()));
+        assert!(app.scrub_tick(0.06, true), "the retried startup is adopted");
+        assert!(app.scrub.is_open());
     }
 
     #[test]
