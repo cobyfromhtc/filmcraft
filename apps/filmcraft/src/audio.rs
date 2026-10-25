@@ -610,7 +610,10 @@ impl AudioOut for CpalOut {
             Err(e) => {
                 // The open may have failed because the device changed format under the app (a
                 // format the scrub did not expect). Re-probe, so the next scrub move aims at
-                // the device's current format instead of failing the same way forever.
+                // the device's current format instead of failing the same way forever. The
+                // probe enumerates and opens the device synchronously on the UI thread, which
+                // is acceptable only because it runs after a failed open — rare, user-paced —
+                // and never on the startup path this scrub open moved off the UI thread.
                 self.refresh_device_format();
                 ScrubStart::Failed(e)
             }
@@ -730,7 +733,11 @@ mod tests {
         }
         assert!(output.pending_start.is_none(), "the hung start is abandoned");
         assert!(cancelled.load(Ordering::SeqCst), "the worker's late result stays out");
-        assert_eq!(output.poll_start(), ScrubStart::Cancelled);
+        // With nothing pending, the poll reports the platform's semantics: on macOS the scrub
+        // open is synchronous, so nothing queued means ready; elsewhere it means a queued start
+        // was cancelled by `stop`.
+        let nothing_pending = if cfg!(target_os = "macos") { ScrubStart::Ready } else { ScrubStart::Cancelled };
+        assert_eq!(output.poll_start(), nothing_pending);
     }
 
     /// Workers stuck inside a driver open cannot be reclaimed, so the number of scrub-open
