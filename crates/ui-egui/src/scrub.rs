@@ -35,6 +35,9 @@ pub struct ScrubAudio {
     open: bool,
     /// The scrub stream's asynchronous startup has not completed.
     pending: bool,
+    /// The sample rate the open or pending stream's grain and mixer were built for. The device
+    /// open can negotiate a different rate; such a stream would play at the wrong speed.
+    open_rate: u32,
     last_tick: Option<Tick>,
     last_move: f64,
 }
@@ -55,7 +58,10 @@ impl FilmcraftApp {
     /// Complete a pending scrub startup. A startup that finishes long after the move that asked
     /// for it — the button is up and the linger has passed — is adopted here and closed by the
     /// linger rule in [`Self::scrub_tick`] in the same tick: the grain it would have played is
-    /// already stale, and dropping it is intended.
+    /// already stale, and dropping it is intended (a short drag that ends before a slow open
+    /// completes can therefore produce no grain). A stream that opened at a different sample
+    /// rate than its grain and mixer were built for is not adopted: it would play at the wrong
+    /// speed, so it is stopped and the next move reopens at the device's actual rate.
     fn poll_scrub_start(&mut self) {
         if !self.scrub.pending {
             return;
@@ -65,7 +71,12 @@ impl FilmcraftApp {
             ScrubStart::Pending => {}
             ScrubStart::Ready => {
                 self.scrub.pending = false;
-                self.scrub.open = true;
+                if audio.sample_rate() == self.scrub.open_rate {
+                    self.scrub.open = true;
+                } else {
+                    log::warn!("the scrub stream opened at {} Hz, not the {} Hz its grain was built for; reopening", audio.sample_rate(), self.scrub.open_rate);
+                    audio.stop();
+                }
             }
             ScrubStart::Cancelled => {
                 // The output was stopped elsewhere while opening (playback took the device,
@@ -149,6 +160,7 @@ impl FilmcraftApp {
         match a.start_scrub(fill) {
             Ok(_) => {
                 self.scrub.pending = true;
+                self.scrub.open_rate = sr;
                 self.poll_scrub_start();
             }
             Err(e) => log::warn!("audio output unavailable for scrubbing: {e}"),
@@ -221,7 +233,6 @@ mod tests {
 
     type Fill = Box<dyn FnMut(&mut [f32], usize) + Send>;
 
-    #[derive(Default)]
     struct DelayedState {
         starts: std::sync::atomic::AtomicUsize,
         stops: std::sync::atomic::AtomicUsize,
@@ -229,6 +240,22 @@ mod tests {
         active_fill: Mutex<Option<Fill>>,
         completion: Mutex<Option<Result<(), String>>>,
         clock_lost: std::sync::atomic::AtomicBool,
+        /// The rate the slow open negotiates (the device may differ from what was asked).
+        rate: std::sync::atomic::AtomicU32,
+    }
+
+    impl Default for DelayedState {
+        fn default() -> Self {
+            Self {
+                starts: std::sync::atomic::AtomicUsize::new(0),
+                stops: std::sync::atomic::AtomicUsize::new(0),
+                waiting_fill: Mutex::new(None),
+                active_fill: Mutex::new(None),
+                completion: Mutex::new(None),
+                clock_lost: std::sync::atomic::AtomicBool::new(false),
+                rate: std::sync::atomic::AtomicU32::new(48_000),
+            }
+        }
     }
 
     struct DelayedOut(Arc<DelayedState>);
@@ -271,7 +298,7 @@ mod tests {
             self.0.active_fill.lock().unwrap().take();
         }
         fn sample_rate(&self) -> u32 {
-            48_000
+            self.0.rate.load(std::sync::atomic::Ordering::SeqCst)
         }
         fn played_frames(&self) -> Option<u64> {
             (!self.0.clock_lost.load(std::sync::atomic::Ordering::SeqCst)).then_some(1)
@@ -436,6 +463,64 @@ mod tests {
         *state.completion.lock().unwrap() = Some(Ok(()));
         assert!(app.scrub_tick(0.06, true), "the retried startup is adopted");
         assert!(app.scrub.is_open());
+    }
+
+    /// The queued open can negotiate a rate other than the one the grain and mixer were built
+    /// for (a changed or reconfigured device): that stream would play its grain at the wrong
+    /// speed. It is dropped at adoption, and the next move reopens at the device's actual rate.
+    #[test]
+    fn a_stream_opened_at_a_different_rate_is_dropped_and_the_next_move_reopens() {
+        use std::sync::atomic::Ordering;
+
+        let (mut app, _) = app(true);
+        let state = Arc::new(DelayedState::default());
+        app.audio = Some(Box::new(DelayedOut(state.clone())));
+        let rate = app.session.sequence_rate();
+        app.scrub_tick(0.0, true);
+        app.session.set_playhead(rate.tick_of(60));
+        assert!(!app.scrub_tick(0.02, true));
+        assert!(app.scrub.pending);
+
+        // the device completes its slow open at 44.1 kHz, not the 48 kHz the grain was built for
+        state.rate.store(44_100, Ordering::SeqCst);
+        *state.completion.lock().unwrap() = Some(Ok(()));
+        assert!(!app.scrub_tick(0.03, false), "the mis-rate stream is not adopted");
+        assert!(!app.scrub.is_open());
+        assert!(!app.scrub.pending);
+        assert_eq!(state.stops.load(Ordering::SeqCst), 2, "it is stopped at once");
+
+        app.session.set_playhead(rate.tick_of(72));
+        assert!(!app.scrub_tick(0.04, true));
+        assert_eq!(state.starts.load(Ordering::SeqCst), 2, "the next move reopens the device");
+        *state.completion.lock().unwrap() = Some(Ok(()));
+        assert!(app.scrub_tick(0.05, true), "the stream opened at the aimed rate is adopted");
+        assert!(app.scrub.is_open());
+    }
+
+    /// Changing Settings ▸ Audio Hardware stops the output: an open scrub must not keep
+    /// re-aiming the dead stream — the next move opens the new device.
+    #[test]
+    fn changing_audio_hardware_resets_an_open_scrub_and_the_next_move_reopens() {
+        use std::sync::atomic::Ordering;
+
+        let (mut app, _) = app(true);
+        let state = Arc::new(DelayedState::default());
+        app.audio = Some(Box::new(DelayedOut(state.clone())));
+        let rate = app.session.sequence_rate();
+        app.scrub_tick(0.0, true);
+        app.session.set_playhead(rate.tick_of(60));
+        assert!(!app.scrub_tick(0.02, true), "the startup is pending");
+        *state.completion.lock().unwrap() = Some(Ok(()));
+        assert!(app.scrub_tick(0.03, true));
+        assert!(app.scrub.is_open());
+
+        app.session.prefs.audio_hardware.default_output = "another device".into();
+        app.apply_prefs(&egui::Context::default());
+        assert!(!app.scrub.is_open(), "the stopped stream is not left open");
+
+        app.session.set_playhead(rate.tick_of(72));
+        assert!(!app.scrub_tick(0.03, true));
+        assert_eq!(state.starts.load(Ordering::SeqCst), 2, "the next move opens the new device");
     }
 
     #[test]
