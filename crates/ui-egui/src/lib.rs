@@ -799,6 +799,9 @@ impl FilmcraftApp {
                 a.stop();
                 a.configure(&p.audio_hardware, rate);
             }
+            // the scrub stream — open, or still starting — was stopped with the device: the
+            // next scrub move opens the new one instead of re-aiming the dead stream
+            self.scrub.device_stopped();
         }
         if (hardware_changed || pitch_changed) && self.playback.playing && self.playback.preroll.is_none() {
             self.playback.anchor_tick = self.session.playhead();
