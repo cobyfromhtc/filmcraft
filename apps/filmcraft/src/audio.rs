@@ -79,10 +79,11 @@ impl Drop for LiveWorkers {
 }
 
 /// The scrub-open worker's body: open the device off the UI thread and return the playing
-/// stream for it to adopt through [`AudioOut::poll_start`]. A start cancelled while the device
-/// was being opened is never heard: `cancelled` is checked before the device is touched and
-/// again between building the stream and playing it, so an abandoned request cannot make sound
-/// — its stream is dropped unplayed instead.
+/// stream for it to adopt through [`AudioOut::poll_start`]. The device's format is validated
+/// before the stream is built — a device that changed format fails the open instead of playing
+/// the grain at the wrong speed — and a start cancelled while the device was being opened is
+/// never heard: `cancelled` is checked before the device is touched and again between building
+/// the stream and playing it.
 #[cfg(not(target_os = "macos"))]
 fn open_scrub_stream(
     cancelled: &AtomicBool,
@@ -113,7 +114,7 @@ fn open_scrub_stream(
         pending_start: None,
         live_workers: Arc::new(AtomicUsize::new(0)),
     };
-    let stream = output.build(fill.clone(), None)?;
+    let stream = output.build(fill.clone(), Some((rate, channels)))?;
     if cancelled.load(Ordering::SeqCst) {
         return Err("scrub audio startup was cancelled".to_string());
     }
@@ -351,6 +352,19 @@ impl CpalOut {
         }
         .map_err(|e| e.to_string())?;
         Ok(stream)
+    }
+
+    /// Re-probe the configured device and record its format, so the next `start` mixes at the
+    /// rate the device actually runs. Without a device, the recorded format stays as it was.
+    fn refresh_device_format(&mut self) {
+        let host = host(&self.hw.device_class);
+        if let Some(choice) = output_device(&host, &self.hw.default_output, &self.fallback)
+            && let Ok(cfg) = self.config(&choice.device)
+        {
+            self.rate = cfg.sample_rate().0;
+            self.channels = cfg.channels();
+            self.note = choice.fallback;
+        }
     }
 
     /// Replace a dropped stream with a new one on the same mixer, clock and format.
@@ -593,7 +607,13 @@ impl AudioOut for CpalOut {
                 self.watchdog.reset(self.epoch.elapsed());
                 ScrubStart::Ready
             }
-            Err(e) => ScrubStart::Failed(e),
+            Err(e) => {
+                // The open may have failed because the device changed format under the app (a
+                // format the scrub did not expect). Re-probe, so the next scrub move aims at
+                // the device's current format instead of failing the same way forever.
+                self.refresh_device_format();
+                ScrubStart::Failed(e)
+            }
         }
     }
     fn recover(&mut self) {
@@ -639,14 +659,7 @@ impl AudioOut for CpalOut {
         self.hw = hw.clone();
         self.document_rate = document_rate;
         // the rate playback mixes at must be known before `start`
-        let host = host(&self.hw.device_class);
-        if let Some(choice) = output_device(&host, &self.hw.default_output, &self.fallback)
-            && let Ok(cfg) = self.config(&choice.device)
-        {
-            self.rate = cfg.sample_rate().0;
-            self.channels = cfg.channels();
-            self.note = choice.fallback;
-        }
+        self.refresh_device_format();
     }
     fn note(&self) -> Option<String> {
         self.note.as_ref().map(Note::text)
@@ -745,6 +758,31 @@ mod tests {
             Ok(_) => panic!("a cancelled open returns instead of opening the device"),
             Err(e) => assert!(e.contains("cancelled"), "{e}"),
         }
+    }
+
+    /// A failed scrub open can mean the device changed format under the app. The recorded
+    /// format is refreshed, so the next scrub move aims at the device's current format instead
+    /// of failing the same way forever.
+    #[test]
+    fn a_failed_scrub_open_refreshes_the_stale_device_format() {
+        let mut output = CpalOut::new();
+        let (worker, result) = std::sync::mpsc::channel();
+        worker.send(Err("the output device now runs at 1 Hz with 2 channels".to_string())).unwrap();
+        output.pending_start = Some(PendingStart { result, cancelled: Arc::new(AtomicBool::new(false)), queued: Instant::now() });
+        output.rate = 1; // stale, as if the device's format had changed under the app
+        match output.poll_start() {
+            ScrubStart::Failed(e) => assert!(e.contains("1 Hz"), "{e}"),
+            other => panic!("the worker's failure is reported, not {other:?}"),
+        }
+        let probe = CpalOut::new();
+        let refreshed = match output.note.as_ref() {
+            // no device: nothing to refresh, the stale rate stays
+            Some(Note::NoDevice) => output.rate == 1,
+            // a device answered: the stale format was replaced by its current one
+            _ => (output.rate, output.channels) == (probe.rate, probe.channels),
+        };
+        assert!(refreshed, "the stale format is refreshed when a device answers");
+        drop(worker);
     }
 
     fn ms(n: u64) -> Duration {
