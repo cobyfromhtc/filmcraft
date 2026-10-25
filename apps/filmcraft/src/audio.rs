@@ -8,9 +8,9 @@
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, TryRecvError};
 #[cfg(not(target_os = "macos"))]
 use std::sync::mpsc::channel;
+use std::sync::mpsc::{Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
 use std::sync::{Arc, Mutex, PoisonError, TryLockError};
@@ -422,10 +422,9 @@ impl AudioOut for CpalOut {
     }
     fn start_scrub(&mut self, fill: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String> {
         self.stop();
-         #[cfg(target_os = "macos")]
-         let fill = Arc::new(Mutex::new(fill));
         #[cfg(target_os = "macos")]
         {
+            let fill = Arc::new(Mutex::new(fill));
             self.played = Arc::new(AtomicU64::new(0));
             self.health = Arc::new(Health::default());
             self.watchdog.reset(self.epoch.elapsed());
@@ -435,59 +434,59 @@ impl AudioOut for CpalOut {
         }
         #[cfg(not(target_os = "macos"))]
         {
-        let (sender, result) = channel();
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let worker_cancelled = cancelled.clone();
-        let hw = self.hw.clone();
-        let document_rate = self.document_rate;
-        let note = self.note.clone();
-        let fallback = self.fallback.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        let rate = self.rate;
-        let channels = self.channels;
-        let fill = Arc::new(Mutex::new(fill));
-        std::thread::Builder::new()
-            .name("filmcraft-scrub-audio".into())
-            .spawn(move || {
-                let result = catch_unwind(AssertUnwindSafe(|| {
-                    if worker_cancelled.load(Ordering::SeqCst) {
-                        return Err("scrub audio startup was cancelled".to_string());
+            let (sender, result) = channel();
+            let cancelled = Arc::new(AtomicBool::new(false));
+            let worker_cancelled = cancelled.clone();
+            let hw = self.hw.clone();
+            let document_rate = self.document_rate;
+            let note = self.note.clone();
+            let fallback = self.fallback.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let rate = self.rate;
+            let channels = self.channels;
+            let fill = Arc::new(Mutex::new(fill));
+            std::thread::Builder::new()
+                .name("filmcraft-scrub-audio".into())
+                .spawn(move || {
+                    let result = catch_unwind(AssertUnwindSafe(|| {
+                        if worker_cancelled.load(Ordering::SeqCst) {
+                            return Err("scrub audio startup was cancelled".to_string());
+                        }
+                        let mut output = CpalOut {
+                            stream: None,
+                            fill: None,
+                            played: Arc::new(AtomicU64::new(0)),
+                            health: Arc::new(Health::default()),
+                            watchdog: Watchdog::default(),
+                            epoch: Instant::now(),
+                            rate,
+                            channels,
+                            hw,
+                            document_rate,
+                            note,
+                            fallback: Mutex::new(fallback),
+                            pending_start: None,
+                        };
+                        output.open(fill.clone(), None)?;
+                        let stream = output.stream.take().ok_or_else(|| "audio stream did not start".to_string())?;
+                        Ok(OpenedOutput {
+                            stream,
+                            fill,
+                            played: output.played,
+                            health: output.health,
+                            rate: output.rate,
+                            channels: output.channels,
+                            note: output.note,
+                            fallback: output.fallback.lock().unwrap_or_else(PoisonError::into_inner).clone(),
+                        })
+                    }))
+                    .unwrap_or_else(|_| Err("scrub audio startup worker panicked".to_string()));
+                    if !worker_cancelled.load(Ordering::SeqCst) {
+                        let _ = sender.send(result);
                     }
-                    let mut output = CpalOut {
-                        stream: None,
-                        fill: None,
-                        played: Arc::new(AtomicU64::new(0)),
-                        health: Arc::new(Health::default()),
-                        watchdog: Watchdog::default(),
-                        epoch: Instant::now(),
-                        rate,
-                        channels,
-                        hw,
-                        document_rate,
-                        note,
-                        fallback: Mutex::new(fallback),
-                        pending_start: None,
-                    };
-                    output.open(fill.clone(), None)?;
-                    let stream = output.stream.take().ok_or_else(|| "audio stream did not start".to_string())?;
-                    Ok(OpenedOutput {
-                        stream,
-                        fill,
-                        played: output.played,
-                        health: output.health,
-                        rate: output.rate,
-                        channels: output.channels,
-                        note: output.note,
-                        fallback: output.fallback.lock().unwrap_or_else(PoisonError::into_inner).clone(),
-                    })
-                }))
-                .unwrap_or_else(|_| Err("scrub audio startup worker panicked".to_string()));
-                if !worker_cancelled.load(Ordering::SeqCst) {
-                    let _ = sender.send(result);
-                }
-            })
-            .map_err(|e| format!("could not start scrub audio worker: {e}"))?;
-        self.pending_start = Some(PendingStart { result, cancelled });
-        Ok(self.rate)
+                })
+                .map_err(|e| format!("could not start scrub audio worker: {e}"))?;
+            self.pending_start = Some(PendingStart { result, cancelled });
+            Ok(self.rate)
         }
     }
     fn poll_start(&mut self) -> Option<Result<(), String>> {
