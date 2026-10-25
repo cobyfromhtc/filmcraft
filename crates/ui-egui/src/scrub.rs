@@ -62,7 +62,7 @@ impl FilmcraftApp {
                 Ok(()) => self.scrub.open = true,
                 Err(e) => {
                     self.scrub.open = false;
-                    self.ui.status = format!("Audio output unavailable for scrubbing: {e}");
+                    self.ui.status = tlf!("Audio output unavailable for scrubbing: {e}", e);
                     log::warn!("audio output unavailable for scrubbing: {e}");
                 }
             }
@@ -207,6 +207,60 @@ mod tests {
 
     type Fill = Box<dyn FnMut(&mut [f32], usize) + Send>;
 
+    #[derive(Default)]
+    struct DelayedState {
+        starts: std::sync::atomic::AtomicUsize,
+        stops: std::sync::atomic::AtomicUsize,
+        waiting_fill: Mutex<Option<Fill>>,
+        active_fill: Mutex<Option<Fill>>,
+        completion: Mutex<Option<Result<(), String>>>,
+        clock_lost: std::sync::atomic::AtomicBool,
+    }
+
+    struct DelayedOut(Arc<DelayedState>);
+
+    impl crate::AudioOut for DelayedOut {
+        fn start(&mut self, fill: Fill) -> Result<u32, String> {
+            *self.0.active_fill.lock().unwrap() = Some(fill);
+            Ok(48_000)
+        }
+        fn start_scrub(&mut self, fill: Fill) -> Result<u32, String> {
+            self.0.starts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            *self.0.waiting_fill.lock().unwrap() = Some(fill);
+            *self.0.completion.lock().unwrap() = None;
+            Ok(48_000)
+        }
+        fn poll_start(&mut self) -> Option<Result<(), String>> {
+            let result = self.0.completion.lock().unwrap().take()?;
+            if result.is_ok() {
+                *self.0.active_fill.lock().unwrap() = self.0.waiting_fill.lock().unwrap().take();
+            } else {
+                self.0.waiting_fill.lock().unwrap().take();
+            }
+            Some(result)
+        }
+        fn stop(&mut self) {
+            self.0.stops.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.0.waiting_fill.lock().unwrap().take();
+            self.0.active_fill.lock().unwrap().take();
+            self.0.completion.lock().unwrap().take();
+        }
+        fn sample_rate(&self) -> u32 {
+            48_000
+        }
+        fn played_frames(&self) -> Option<u64> {
+            (!self.0.clock_lost.load(std::sync::atomic::Ordering::SeqCst)).then_some(1)
+        }
+    }
+
+    fn loudness_of(fill: &Mutex<Option<Fill>>) -> f32 {
+        let mut g = fill.lock().unwrap();
+        let Some(f) = g.as_mut() else { return 0.0 };
+        let mut buf = vec![0.0; 4096 * 2];
+        f(&mut buf, 2);
+        buf.iter().map(|s| s.abs()).sum()
+    }
+
     /// An output that keeps the callback it was started with.
     struct Out {
         fill: Arc<Mutex<Option<Fill>>>,
@@ -268,72 +322,95 @@ mod tests {
 
     #[test]
     fn delayed_start_is_not_cancelled_by_moves_or_release() {
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-
-        struct DelayedOut {
-            starts: Arc<AtomicUsize>,
-            stops: Arc<AtomicUsize>,
-            pending: Arc<AtomicBool>,
-            ready: Arc<AtomicBool>,
-        }
-
-        impl crate::AudioOut for DelayedOut {
-            fn start(&mut self, _: Fill) -> Result<u32, String> {
-                Ok(48_000)
-            }
-            fn start_scrub(&mut self, _: Fill) -> Result<u32, String> {
-                self.starts.fetch_add(1, Ordering::SeqCst);
-                self.pending.store(true, Ordering::SeqCst);
-                Ok(48_000)
-            }
-            fn poll_start(&mut self) -> Option<Result<(), String>> {
-                if self.pending.load(Ordering::SeqCst) && self.ready.load(Ordering::SeqCst) {
-                    self.pending.store(false, Ordering::SeqCst);
-                    Some(Ok(()))
-                } else {
-                    None
-                }
-            }
-            fn stop(&mut self) {
-                self.stops.fetch_add(1, Ordering::SeqCst);
-                self.pending.store(false, Ordering::SeqCst);
-            }
-            fn sample_rate(&self) -> u32 {
-                48_000
-            }
-            fn played_frames(&self) -> Option<u64> {
-                None
-            }
-        }
+        use std::sync::atomic::Ordering;
 
         let (mut app, _) = app(true);
-        let starts = Arc::new(AtomicUsize::new(0));
-        let stops = Arc::new(AtomicUsize::new(0));
-        let pending = Arc::new(AtomicBool::new(false));
-        let ready = Arc::new(AtomicBool::new(false));
-        app.audio = Some(Box::new(DelayedOut { starts: starts.clone(), stops: stops.clone(), pending: pending.clone(), ready: ready.clone() }));
+        let state = Arc::new(DelayedState::default());
+        app.audio = Some(Box::new(DelayedOut(state.clone())));
 
         let rate = app.session.sequence_rate();
         app.scrub_tick(0.0, true);
         app.session.set_playhead(rate.tick_of(60));
         assert!(!app.scrub_tick(0.02, true), "a queued startup is not an open stream");
+        assert!(!app.scrub.is_open());
         assert!(app.scrub.pending);
+        assert!(loudness_of(&state.waiting_fill) > 0.0, "a grain plays while startup is pending");
 
         app.session.set_playhead(rate.tick_of(72));
         assert!(!app.scrub_tick(0.04, true));
-        assert_eq!(starts.load(Ordering::SeqCst), 1, "later moves retain the pending request");
-        assert_eq!(stops.load(Ordering::SeqCst), 1, "later moves do not cancel startup");
+        assert_eq!(state.starts.load(Ordering::SeqCst), 1, "later moves retain the pending request");
+        assert_eq!(state.stops.load(Ordering::SeqCst), 1, "later moves do not cancel startup");
+        assert!(loudness_of(&state.waiting_fill) > 0.0, "later moves re-aim the pending stream's grain");
 
         assert!(!app.scrub_tick(0.05, false), "release leaves delayed startup alone");
-        assert!(pending.load(Ordering::SeqCst));
-        assert_eq!(stops.load(Ordering::SeqCst), 1, "release does not cancel startup");
+        assert!(state.waiting_fill.lock().unwrap().is_some());
+        assert_eq!(state.stops.load(Ordering::SeqCst), 1, "release does not cancel startup");
 
-        ready.store(true, Ordering::SeqCst);
+        app.session.set_playhead(rate.tick_of(84));
+        assert!(!app.scrub_tick(0.06, true));
+        *state.completion.lock().unwrap() = Some(Ok(()));
         assert!(app.scrub_tick(0.1, false), "completed startup is open during its linger");
         assert!(app.scrub.is_open());
-        assert!(!pending.load(Ordering::SeqCst));
-        assert!(!app.scrub_tick(0.05 + LINGER_S, false), "the ready stream closes after linger");
-        assert_eq!(stops.load(Ordering::SeqCst), 2);
+        assert!(loudness_of(&state.active_fill) > 0.0, "the adopted stream plays the latest grain");
+        assert!(!app.scrub_tick(0.06 + LINGER_S, false), "the ready stream closes after linger");
+        assert_eq!(state.stops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn delayed_start_failure_reports_error_and_the_next_move_retries() {
+        crate::i18n::set_current(crate::i18n::Language::Es);
+        let (mut app, _) = app(true);
+        let state = Arc::new(DelayedState::default());
+        app.audio = Some(Box::new(DelayedOut(state.clone())));
+        let rate = app.session.sequence_rate();
+
+        app.scrub_tick(0.0, true);
+        app.session.set_playhead(rate.tick_of(60));
+        assert!(!app.scrub_tick(0.02, true));
+        *state.completion.lock().unwrap() = Some(Err("startup failed".into()));
+        assert!(!app.scrub_tick(0.03, false));
+        assert!(!app.scrub.is_open());
+        assert!(!app.scrub.pending);
+        assert!(app.ui.status.contains("startup failed"));
+        assert!(app.ui.status.starts_with("Salida de audio no disponible al arrastrar:"));
+
+        app.session.set_playhead(rate.tick_of(72));
+        assert!(!app.scrub_tick(0.04, true));
+        assert_eq!(state.starts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(app.scrub.pending, "a later move retries after a failed startup");
+        crate::i18n::set_current(crate::i18n::Language::En);
+    }
+
+    #[test]
+    fn playback_clock_loss_clears_scrub_and_the_next_move_reopens_output() {
+        use std::sync::atomic::Ordering;
+
+        let (mut app, _) = app(true);
+        let state = Arc::new(DelayedState::default());
+        app.audio = Some(Box::new(DelayedOut(state.clone())));
+        let rate = app.session.sequence_rate();
+        app.scrub_tick(0.0, true);
+        app.session.set_playhead(rate.tick_of(60));
+        assert!(!app.scrub_tick(0.02, true));
+        *state.completion.lock().unwrap() = Some(Ok(()));
+        assert!(app.scrub_tick(0.03, true));
+        assert!(app.scrub.is_open());
+
+        app.playback.playing = true;
+        app.playback.speed = 1.0;
+        app.playback.audio_clock = true;
+        app.playback.anchor_time = 0.0;
+        state.clock_lost.store(true, Ordering::SeqCst);
+        app.advance_playback(&egui::Context::default());
+        assert!(!app.playback.audio_clock);
+        assert!(!app.scrub.is_open(), "clock loss invalidates the scrub stream");
+        assert!(!app.scrub.pending);
+
+        app.playback.playing = false;
+        state.clock_lost.store(false, Ordering::SeqCst);
+        app.session.set_playhead(rate.tick_of(72));
+        assert!(!app.scrub_tick(0.04, true));
+        assert_eq!(state.starts.load(Ordering::SeqCst), 2, "the next scrub opens a new device stream");
     }
 
     #[test]
