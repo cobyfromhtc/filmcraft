@@ -79,6 +79,22 @@ use native_dialogs::FileDialog;
 use state::UiState;
 use theme::{ThemeKind, Tokens};
 
+/// The outcome of [`AudioOut::poll_start`], which completes a scrub startup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScrubStart {
+    /// The asynchronous device open is still in flight; poll again.
+    Pending,
+    /// The stream is installed and playing.
+    Ready,
+    /// The open failed; the message says why (reported in the status bar). The next scrub move
+    /// may try again.
+    Failed(String),
+    /// Nothing is pending: the open was abandoned — [`AudioOut::stop`] ran while it was in
+    /// flight (playback took the device, Settings ▸ Audio Hardware changed it). Not an error
+    /// (the user caused it); the next scrub move opens the device again.
+    Cancelled,
+}
+
 /// Audio output provided by the platform layer (cpal on desktop, WebAudio on web).
 pub trait AudioOut {
     /// Start output; `fill(buffer, channels)` is called on the audio thread with interleaved f32.
@@ -86,10 +102,11 @@ pub trait AudioOut {
     fn start_scrub(&mut self, fill: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String> {
         self.start(fill)
     }
-    /// Complete a scrub startup. `None` means an asynchronous start is still pending; the
-    /// default reports synchronous starts as ready.
-    fn poll_start(&mut self) -> Option<Result<(), String>> {
-        Some(Ok(()))
+    /// Complete a scrub startup. The default reports a synchronous start as
+    /// [`ScrubStart::Ready`]; an output that queues the device open on a worker reports
+    /// [`ScrubStart::Pending`] until it finishes.
+    fn poll_start(&mut self) -> ScrubStart {
+        ScrubStart::Ready
     }
     fn stop(&mut self);
     /// Device sample rate.
