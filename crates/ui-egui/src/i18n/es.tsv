@@ -3459,6 +3459,7 @@
 	% of all commits	% de todos los commits
 	Lines +/−	Líneas +/−
 	Audio output failed: playing without sound (check Settings ▸ Audio Hardware)	La salida de audio ha fallado: se reproduce sin sonido (revisa Ajustes ▸ Hardware de audio)
+	Audio output unavailable for scrubbing: {e}	Salida de audio no disponible al arrastrar: {e}
 	Audio output is not responding: playing without sound (check Settings ▸ Audio Hardware)	La salida de audio no responde: se reproduce sin sonido (revisa Ajustes ▸ Hardware de audio)
 	Clip Speed / Duration	Velocidad/duración del clip
 	Speed:	Velocidad:
