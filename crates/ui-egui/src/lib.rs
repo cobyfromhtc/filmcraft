@@ -1175,6 +1175,7 @@ impl FilmcraftApp {
             if let Some(audio) = self.audio.as_mut() {
                 audio.stop();
             }
+            self.scrub.device_stopped();
             log::warn!("audio output lost its playback clock; playing without sound");
             self.ui.status = tl!("Audio output failed: playing without sound (check Settings ▸ Audio Hardware)").into();
         }
