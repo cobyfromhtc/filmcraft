@@ -59,6 +59,7 @@ impl FilmcraftApp {
                 Ok(()) => self.scrub.open = true,
                 Err(e) => {
                     self.scrub.open = false;
+                    self.ui.status = format!("Audio output unavailable for scrubbing: {e}");
                     log::warn!("audio output unavailable for scrubbing: {e}");
                 }
             }
