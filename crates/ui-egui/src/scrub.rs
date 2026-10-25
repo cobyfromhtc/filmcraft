@@ -55,14 +55,14 @@ impl ScrubAudio {
 }
 
 impl FilmcraftApp {
-    /// Complete a pending scrub startup. A startup that finishes long after the move that asked
-    /// for it — the button is up and the linger has passed — is adopted here and closed by the
-    /// linger rule in [`Self::scrub_tick`] in the same tick: the grain it would have played is
-    /// already stale, and dropping it is intended (a short drag that ends before a slow open
-    /// completes can therefore produce no grain). A stream that opened at a different sample
-    /// rate than its grain and mixer were built for is not adopted: it would play at the wrong
-    /// speed, so it is stopped and the next move reopens at the device's actual rate.
-    fn poll_scrub_start(&mut self) {
+    /// Complete a pending scrub startup. A startup that finishes after the drag was released
+    /// still plays its grain: the stream starts as the device opens, which on a slow open is
+    /// after the release, so the linger is restarted here and the stream closes [`LINGER_S`]
+    /// after its adoption instead of being dropped as stale in the same tick. A stream that
+    /// opened at a different sample rate than its grain and mixer were built for is not
+    /// adopted: it would play at the wrong speed, so it is stopped and the next move reopens
+    /// at the device's actual rate.
+    fn poll_scrub_start(&mut self, now: f64) {
         if !self.scrub.pending {
             return;
         }
@@ -73,6 +73,7 @@ impl FilmcraftApp {
                 self.scrub.pending = false;
                 if audio.sample_rate() == self.scrub.open_rate {
                     self.scrub.open = true;
+                    self.scrub.last_move = now;
                 } else {
                     log::warn!("the scrub stream opened at {} Hz, not the {} Hz its grain was built for; reopening", audio.sample_rate(), self.scrub.open_rate);
                     audio.stop();
@@ -107,7 +108,7 @@ impl FilmcraftApp {
     /// [`FilmcraftApp::scrub_audio`] with the clock and the button state given. Returns whether
     /// the scrub stream is still open.
     pub fn scrub_tick(&mut self, now: f64, down: bool) -> bool {
-        self.poll_scrub_start();
+        self.poll_scrub_start(now);
         let ph = self.session.playhead();
         let prev = self.scrub.last_tick.replace(ph);
         if self.playback.playing || self.source_playback.clock.playing {
@@ -161,7 +162,7 @@ impl FilmcraftApp {
             Ok(_) => {
                 self.scrub.pending = true;
                 self.scrub.open_rate = sr;
-                self.poll_scrub_start();
+                self.poll_scrub_start(now);
             }
             Err(e) => log::warn!("audio output unavailable for scrubbing: {e}"),
         }
@@ -404,8 +405,31 @@ mod tests {
         assert!(app.scrub_tick(0.1, false), "completed startup is open during its linger");
         assert!(app.scrub.is_open());
         assert!(loudness_of(&state.active_fill) > 0.0, "the adopted stream plays the latest grain");
-        assert!(!app.scrub_tick(0.06 + LINGER_S, false), "the ready stream closes after linger");
+        assert!(!app.scrub_tick(0.1 + LINGER_S + 0.01, false), "the ready stream closes after the linger granted at adoption");
         assert_eq!(state.stops.load(Ordering::SeqCst), 2);
+    }
+
+    /// A slow open that completes after the drag was released still plays the drag's grain:
+    /// adoption restarts the linger, instead of closing the just-opened stream as stale in the
+    /// same tick and leaving the first grain of a short drag inaudible.
+    #[test]
+    fn a_slow_open_plays_the_released_drag_grain_instead_of_dropping_it() {
+        let (mut app, _) = app(true);
+        let state = Arc::new(DelayedState::default());
+        app.audio = Some(Box::new(DelayedOut(state.clone())));
+        let rate = app.session.sequence_rate();
+
+        app.scrub_tick(0.0, true);
+        app.session.set_playhead(rate.tick_of(60));
+        assert!(!app.scrub_tick(0.02, true), "the startup is pending");
+        assert!(!app.scrub_tick(0.05, false), "release leaves the pending startup alone");
+
+        // the device finishes its open long after the release
+        *state.completion.lock().unwrap() = Some(Ok(()));
+        assert!(app.scrub_tick(0.5, false), "the adopted stream lingers to play its grain");
+        assert!(app.scrub.is_open());
+        assert!(loudness_of(&state.active_fill) > 0.0, "the drag's grain is heard after the slow open");
+        assert!(!app.scrub_tick(0.5 + LINGER_S, false), "then the stream closes");
     }
 
     #[test]
