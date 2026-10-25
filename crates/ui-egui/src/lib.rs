@@ -86,8 +86,10 @@ pub trait AudioOut {
     fn start_scrub(&mut self, fill: Box<dyn FnMut(&mut [f32], usize) + Send>) -> Result<u32, String> {
         self.start(fill)
     }
+    /// Complete a scrub startup. `None` means an asynchronous start is still pending; the
+    /// default reports synchronous starts as ready.
     fn poll_start(&mut self) -> Option<Result<(), String>> {
-        None
+        Some(Ok(()))
     }
     fn stop(&mut self);
     /// Device sample rate.
@@ -96,6 +98,7 @@ pub trait AudioOut {
     fn channels(&self) -> usize {
         2
     }
+
     /// Frames played since `start` (the playback master clock), if the device reports it.
     fn played_frames(&self) -> Option<u64>;
     /// Called every frame while playing, before `played_frames`: restart a stream the device
